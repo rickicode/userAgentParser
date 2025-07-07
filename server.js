@@ -24,50 +24,72 @@ function isAndroid11Plus(version) {
 // Function to check if iOS version is 17 or above
 function isIOS17Plus(version) {
     if (!version) return false;
-    const versionNumber = parseInt(version.split('.')[0]);
+    
+    // Handle different iOS version formats
+    // Examples: "17.0", "17.1.1", "17_0", etc.
+    const cleanVersion = version.replace(/_/g, '.');
+    const versionNumber = parseInt(cleanVersion.split('.')[0]);
+    
     return versionNumber >= 17;
 }
 
-// Function to parse and filter user agents with progress tracking
+// Function to parse and filter user agents with progress tracking and duplicate detection
 function parseAndFilterUserAgents(userAgentList, progressCallback = null) {
     const results = [];
     const lines = userAgentList.split('\n').filter(line => line.trim() !== '');
     const total = lines.length;
+    const seenUserAgents = new Map(); // Track duplicates with first occurrence index
+    let duplicateCount = 0;
     
     console.log(`Processing ${total} user agents...`);
     
     lines.forEach((userAgent, index) => {
-        const parser = new UAParser(userAgent.trim());
+        const trimmedUserAgent = userAgent.trim();
+        const parser = new UAParser(trimmedUserAgent);
         const result = parser.getResult();
         
         let isValid = false;
         let reason = '';
+        let isDuplicate = false;
         
-        if (result.os.name === 'Android') {
-            if (isAndroid11Plus(result.os.version)) {
-                isValid = true;
-                reason = `Android ${result.os.version} (Valid - Android 11+)`;
-            } else {
-                reason = `Android ${result.os.version || 'Unknown'} (Invalid - Below Android 11)`;
-            }
-        } else if (result.os.name === 'iOS') {
-            if (isIOS17Plus(result.os.version)) {
-                isValid = true;
-                reason = `iOS ${result.os.version} (Valid - iOS 17+)`;
-            } else {
-                reason = `iOS ${result.os.version || 'Unknown'} (Invalid - Below iOS 17)`;
-            }
+        // Check for duplicates
+        if (seenUserAgents.has(trimmedUserAgent)) {
+            isDuplicate = true;
+            duplicateCount++;
+            const firstIndex = seenUserAgents.get(trimmedUserAgent);
+            reason = `Duplicate (first seen at line ${firstIndex + 1})`;
         } else {
-            reason = `${result.os.name || 'Unknown OS'} (Invalid - Not Android/iOS)`;
+            seenUserAgents.set(trimmedUserAgent, index);
+            
+            // Original validation logic
+            if (result.os.name === 'Android') {
+                if (isAndroid11Plus(result.os.version)) {
+                    isValid = true;
+                    reason = `Android ${result.os.version} (Valid - Android 11+)`;
+                } else {
+                    reason = `Android ${result.os.version || 'Unknown'} (Invalid - Below Android 11)`;
+                }
+            } else if (result.os.name === 'iOS' || result.os.name === 'iPhone OS') {
+                // Support both "iOS" and "iPhone OS" naming conventions
+                if (isIOS17Plus(result.os.version)) {
+                    isValid = true;
+                    reason = `iOS ${result.os.version} (Valid - iOS 17+)`;
+                } else {
+                    reason = `iOS ${result.os.version || 'Unknown'} (Invalid - Below iOS 17)`;
+                }
+            } else {
+                reason = `${result.os.name || 'Unknown OS'} (Invalid - Not Android/iOS)`;
+            }
         }
         
         results.push({
             index: index + 1,
-            userAgent: userAgent.trim(),
+            userAgent: trimmedUserAgent,
             browser: `${result.browser.name || 'Unknown'} ${result.browser.version || ''}`.trim(),
             os: `${result.os.name || 'Unknown'} ${result.os.version || ''}`.trim(),
             device: result.device.model || 'Unknown',
-            isValid,
+            isValid: isValid && !isDuplicate, // Valid only if not duplicate
+            isDuplicate,
             reason
         });
         
@@ -77,8 +99,23 @@ function parseAndFilterUserAgents(userAgentList, progressCallback = null) {
         }
     });
     
-    console.log(`Completed processing ${total} user agents. Valid: ${results.filter(r => r.isValid).length}`);
-    return results;
+    const validResults = results.filter(r => r.isValid);
+    const uniqueCount = total - duplicateCount;
+    
+    console.log(`Completed processing ${total} user agents.`);
+    console.log(`- Unique: ${uniqueCount}, Duplicates: ${duplicateCount}`);
+    console.log(`- Valid: ${validResults.length}, Invalid/Filtered: ${total - validResults.length}`);
+    
+    return {
+        results,
+        stats: {
+            total,
+            unique: uniqueCount,
+            duplicates: duplicateCount,
+            valid: validResults.length,
+            invalid: total - validResults.length
+        }
+    };
 }
 
 // Routes
@@ -103,15 +140,16 @@ app.post('/parse', (req, res) => {
         
         console.log(`Received request to parse user agents. Size: ${userAgents.length} characters`);
         
-        const results = parseAndFilterUserAgents(userAgents);
-        const validResults = results.filter(r => r.isValid);
+        const parseResult = parseAndFilterUserAgents(userAgents);
         
         res.json({
             success: true,
-            total: results.length,
-            valid: validResults.length,
-            invalid: results.length - validResults.length,
-            results: results
+            total: parseResult.stats.total,
+            unique: parseResult.stats.unique,
+            duplicates: parseResult.stats.duplicates,
+            valid: parseResult.stats.valid,
+            invalid: parseResult.stats.invalid,
+            results: parseResult.results
         });
         
     } catch (error) {
@@ -137,14 +175,14 @@ app.post('/parse-csv', (req, res) => {
         
         console.log(`Received CSV request to parse user agents. Size: ${userAgents.length} characters`);
         
-        const results = parseAndFilterUserAgents(userAgents);
+        const parseResult = parseAndFilterUserAgents(userAgents);
         
         // Generate CSV
-        let csv = 'Index,Valid,Browser,OS,Device,Reason,User Agent\n';
-        results.forEach(result => {
+        let csv = 'Index,Valid,Duplicate,Browser,OS,Device,Reason,User Agent\n';
+        parseResult.results.forEach(result => {
             const userAgentEscaped = `"${result.userAgent.replace(/"/g, '""')}"`;
             const reasonEscaped = `"${result.reason.replace(/"/g, '""')}"`;
-            csv += `${result.index},${result.isValid ? 'YES' : 'NO'},"${result.browser}","${result.os}","${result.device}",${reasonEscaped},${userAgentEscaped}\n`;
+            csv += `${result.index},${result.isValid ? 'YES' : 'NO'},${result.isDuplicate ? 'YES' : 'NO'},"${result.browser}","${result.os}","${result.device}",${reasonEscaped},${userAgentEscaped}\n`;
         });
         
         res.setHeader('Content-Type', 'text/csv');
