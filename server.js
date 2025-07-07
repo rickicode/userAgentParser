@@ -30,7 +30,7 @@ function isIOS17Plus(version) {
     const cleanVersion = version.replace(/_/g, '.');
     const versionNumber = parseInt(cleanVersion.split('.')[0]);
     
-    return versionNumber >= 17;
+    return versionNumber >= 15;
 }
 
 // Function to parse and filter user agents with progress tracking and duplicate detection
